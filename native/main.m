@@ -91,11 +91,11 @@
 }
 
 - (NSDictionary *)appearanceForHealth:(NSString *)health {
-    if ([health isEqualToString:@"ok"]) return @{ @"symbol": @"checkmark.circle.fill", @"label": @"已同步" };
-    if ([health isEqualToString:@"syncing"]) return @{ @"symbol": @"arrow.triangle.2.circlepath", @"label": @"正在同步" };
-    if ([health isEqualToString:@"conflict"]) return @{ @"symbol": @"exclamationmark.triangle.fill", @"label": @"有冲突" };
-    if ([health isEqualToString:@"error"]) return @{ @"symbol": @"xmark.octagon.fill", @"label": @"同步错误" };
-    return @{ @"symbol": @"questionmark.circle.fill", @"label": @"等待同步" };
+    if ([health isEqualToString:@"ok"]) return @{ @"symbol": @"checkmark.circle.fill", @"label": @"已同步", @"color": [NSColor systemGreenColor] };
+    if ([health isEqualToString:@"syncing"]) return @{ @"symbol": @"arrow.triangle.2.circlepath", @"label": @"正在同步", @"color": [NSColor systemBlueColor] };
+    if ([health isEqualToString:@"conflict"]) return @{ @"symbol": @"exclamationmark.triangle.fill", @"label": @"有冲突", @"color": [NSColor systemOrangeColor] };
+    if ([health isEqualToString:@"error"]) return @{ @"symbol": @"xmark.octagon.fill", @"label": @"同步错误", @"color": [NSColor systemRedColor] };
+    return @{ @"symbol": @"questionmark.circle.fill", @"label": @"等待同步", @"color": [NSColor systemGrayColor] };
 }
 
 - (void)refresh:(id)sender {
@@ -106,6 +106,7 @@
 
     NSImage *image = [NSImage imageWithSystemSymbolName:appearance[@"symbol"] accessibilityDescription:appearance[@"label"]];
     image.template = YES;
+    self.statusItem.button.contentTintColor = appearance[@"color"];
     self.statusItem.button.image = image;
     self.statusItem.button.toolTip = [NSString stringWithFormat:@"ocr2md：%@", appearance[@"label"]];
 
