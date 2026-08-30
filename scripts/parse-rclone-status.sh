@@ -54,7 +54,14 @@ if (( HAS_DELETE_GUARD )); then
   DETAIL=$(printf '%s\n' "$RUN" | grep -E 'Safety abort: too many deletes|Failed to bisync: too many deletes' | tail -1 | sed -E 's/^[0-9\/]+ [0-9:]+ (ERROR|NOTICE):[[:space:]]*//')
   emit "delete_protection" "批量删除保护" "$LAST_SUCCESS" "$DETAIL"
 elif (( HAS_CONFLICT )); then
-  DETAIL=$(printf '%s\n' "$RUN" | grep -Ei 'conflict|New or changed in both paths' | grep -Ev 'Checking potential conflicts|Finished checking the potential conflicts|\.rclone-bisync-access' | tail -1 | sed -E 's/^[0-9\/]+ [0-9:]+ (INFO|NOTICE|ERROR|WARNING):[[:space:]]*//')
+  # Prefer rclone's explicit both-paths warning for the detail text. This avoids
+  # accidentally matching a file or directory whose ordinary name contains
+  # the word "conflict".
+  DETAIL=$(printf '%s\n' "$RUN" | grep -E 'WARNING[[:space:]]+New or changed in both paths' | grep -v '\.rclone-bisync-access' | tail -1 | sed -E 's/^[0-9\/]+ [0-9:]+ (INFO|NOTICE|ERROR|WARNING):[[:space:]]*//')
+  if [[ -z "$DETAIL" ]]; then
+    DETAIL=$(printf '%s\n' "$RUN" | grep -Ei 'Renaming Path[12] copy|conflict winner|conflict loser|conflict.*renam|renam.*conflict' | tail -1 | sed -E 's/^[0-9\/]+ [0-9:]+ (INFO|NOTICE|ERROR|WARNING):[[:space:]]*//')
+  fi
+  [[ -n "$DETAIL" ]] || DETAIL="同一文件在两端同时发生变化"
   emit "conflict" "检测到冲突" "$LAST_SUCCESS" "$DETAIL"
 elif (( HAS_SUCCESS )); then
   if (( HAS_P1_TO_P2 && ! HAS_P2_TO_P1 )); then
