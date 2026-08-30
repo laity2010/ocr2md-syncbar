@@ -13,38 +13,32 @@ DETAIL=$(printf '%s\n' "$RESULT" | sed -n 's/^DETAIL=//p' | head -1)
 
 case "$STATUS" in
   synced)
-    ICON="●"
-    COLOR="#1B7F3A,#72D58C"
+    ICON="🟢"
     ;;
-  icloud_to_gdrive|gdrive_to_icloud|syncing)
-    case "$STATUS" in
-      icloud_to_gdrive) ICON="↑" ;;
-      gdrive_to_icloud) ICON="↓" ;;
-      syncing)          ICON="↻" ;;
-    esac
-    COLOR="#1261A0,#70B7FF"
+  icloud_to_gdrive)
+    ICON="🔵"
+    ;;
+  gdrive_to_icloud)
+    ICON="🔵"
+    ;;
+  syncing)
+    ICON="🔵"
     ;;
   delete_protection)
-    ICON="⛔︎"
-    COLOR="#A65300,#FFB35C"
+    ICON="🟠"
     ;;
   stale|service_unavailable|conflict)
-    case "$STATUS" in
-      conflict) ICON="⚠︎" ;;
-      *)        ICON="!" ;;
-    esac
-    COLOR="#B42318,#FF7B72"
+    ICON="🔴"
     ;;
   *)
-    ICON="!"
-    COLOR="#B42318,#FF7B72"
+    ICON="🔴"
     ;;
 esac
 
-printf '%s %s | color=%s\n' "$ICON" "$LABEL" "$COLOR"
+printf '%s %s\n' "$ICON" "$LABEL"
 echo '---'
 echo "ocr2md SyncBar"
-echo "状态：$LABEL | color=$COLOR"
+echo "状态：$ICON $LABEL"
 echo "最后成功：$LAST_SUCCESS"
 echo "详情：$DETAIL"
 echo '---'
