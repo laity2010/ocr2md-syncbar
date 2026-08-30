@@ -45,6 +45,7 @@ fi
 echo "Using existing config/local.env."
 
 defaults write com.ameba.SwiftBar PluginDirectory "$PLUGIN_DIR"
+defaults write com.ameba.SwiftBar PR_LAUNCH_AT_LOGIN -bool true
 killall SwiftBar 2>/dev/null || true
 sleep 1
 open -a SwiftBar

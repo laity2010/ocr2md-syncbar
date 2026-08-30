@@ -28,6 +28,13 @@ else
   info "actual:   ${ACTUAL_PLUGIN_DIR:-<unset>}"
 fi
 
+LAUNCH_AT_LOGIN=$(defaults read com.ameba.SwiftBar PR_LAUNCH_AT_LOGIN 2>/dev/null || true)
+if [[ "$LAUNCH_AT_LOGIN" == "1" ]]; then
+  ok 'SwiftBar launch at login enabled'
+else
+  bad 'SwiftBar launch at login is not enabled'
+fi
+
 if launchctl print "gui/$(id -u)/$OCR2MD_LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
   ok "LaunchAgent loaded ($OCR2MD_LAUNCH_AGENT_LABEL)"
 else

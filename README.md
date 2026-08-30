@@ -54,3 +54,9 @@ Run:
 
 It checks SwiftBar, the plugin directory, the LaunchAgent, the rclone log, both sync folders, and the status parser without changing sync data.
 
+
+## Runtime behavior
+
+SwiftBar is configured to launch at login. The menu bar refreshes every 10 seconds, while the existing rclone LaunchAgent remains the only process that performs synchronization.
+
+Desktop notifications are emitted when the status enters a new abnormal state: conflict, delete protection, stalled sync, unloaded sync service, or sync error. The same abnormal state is notified only once until the state changes or recovers.

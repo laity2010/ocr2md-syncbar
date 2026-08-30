@@ -11,6 +11,8 @@ LABEL=$(printf '%s\n' "$RESULT" | sed -n 's/^LABEL=//p' | head -1)
 LAST_SUCCESS=$(printf '%s\n' "$RESULT" | sed -n 's/^LAST_SUCCESS=//p' | head -1)
 DETAIL=$(printf '%s\n' "$RESULT" | sed -n 's/^DETAIL=//p' | head -1)
 
+"$PROJECT_DIR/scripts/notify-status.sh" "$STATUS" "$LABEL" "$DETAIL" >/dev/null 2>&1 || true
+
 case "$STATUS" in
   synced)
     ICON="🟢"
