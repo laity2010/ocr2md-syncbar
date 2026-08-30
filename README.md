@@ -23,3 +23,34 @@ Then set these values for the Mac:
 - `OCR2MD_STALE_AFTER_SECONDS`
 
 The current Mac already has its local configuration. Future changes from test folders to production folders should be made in `config/local.env` only.
+
+## Install / reinstall
+
+On a Mac that already has the ocr2md rclone bridge configured:
+
+```sh
+git clone https://github.com/laity2010/ocr2md-syncbar.git
+cd ocr2md-syncbar
+./install.sh
+```
+
+The installer:
+
+- installs SwiftBar with Homebrew if needed;
+- preserves an existing `config/local.env`;
+- creates `config/local.env` from the template if it is missing;
+- points SwiftBar at this checkout's `swiftbar/` directory;
+- starts SwiftBar and runs a health check.
+
+`config/local.env` is deliberately not committed. On a new Mac, edit that file once with the local LaunchAgent label, rclone log path, iCloud path, and Google Drive path, then run `./install.sh` again.
+
+## Health check
+
+Run:
+
+```sh
+./scripts/doctor.sh
+```
+
+It checks SwiftBar, the plugin directory, the LaunchAgent, the rclone log, both sync folders, and the status parser without changing sync data.
+
