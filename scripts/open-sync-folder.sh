@@ -1,9 +1,11 @@
 #!/bin/zsh
 set -u
 
+source "${0:A:h}/lib/load-config.sh"
+
 TARGET="${1:-}"
-ICLOUD_PATH="${OCR2MD_ICLOUD_PATH:-$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-rclone-test}"
-GDRIVE_PATH="${OCR2MD_GDRIVE_PATH:-$HOME/Library/CloudStorage/GoogleDrive-nathandscott986@gmail.com/我的云端硬盘/Obsidian/ocr2md-merge-test/cloud-nav-test}"
+ICLOUD_PATH="$OCR2MD_ICLOUD_PATH"
+GDRIVE_PATH="$OCR2MD_GDRIVE_PATH"
 
 case "$TARGET" in
   icloud) PATH_TO_OPEN="$ICLOUD_PATH" ;;

@@ -1,7 +1,9 @@
 #!/bin/zsh
 set -u
 
-LABEL="${OCR2MD_LAUNCH_AGENT_LABEL:-com.ocr2md.rclone-bridge-test}"
+source "${0:A:h}/lib/load-config.sh"
+
+LABEL="$OCR2MD_LAUNCH_AGENT_LABEL"
 DOMAIN="gui/$(id -u)"
 JOB="$DOMAIN/$LABEL"
 

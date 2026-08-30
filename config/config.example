@@ -1,1 +1,10 @@
-# Local-only configuration goes here.
+# Copy this file to config/local.env and adjust paths for this Mac.
+# local.env is ignored by Git and is the only place that should contain
+# machine-specific account names or paths.
+# Values are only used when the matching environment variable is not already set.
+
+: "${OCR2MD_RCLONE_LOG:=$HOME/Library/Logs/ocr2md-sync/bridge.log}"
+: "${OCR2MD_LAUNCH_AGENT_LABEL:=com.ocr2md.rclone-bridge}"
+: "${OCR2MD_ICLOUD_PATH:=$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/Your-Obsidian-Vault}"
+: "${OCR2MD_GDRIVE_PATH:=$HOME/Library/CloudStorage/GoogleDrive-your-account/Your-Google-Drive-Folder}"
+: "${OCR2MD_STALE_AFTER_SECONDS:=180}"

@@ -1,7 +1,8 @@
 #!/bin/zsh
 set -eu
 
-LOG_FILE="${OCR2MD_RCLONE_LOG:-$HOME/Library/Logs/ocr2md-sync/bridge-test.log}"
+source "${0:A:h}/lib/load-config.sh"
+LOG_FILE="$OCR2MD_RCLONE_LOG"
 
 if [[ ! -e "$LOG_FILE" ]]; then
   osascript -e 'display alert "ocr2md SyncBar" message "同步日志不存在。" as warning'
