@@ -31,4 +31,5 @@ echo "最后成功：$LAST_SUCCESS"
 echo "详情：$DETAIL"
 echo '---'
 echo "立即同步 | bash=$PROJECT_DIR/scripts/trigger-sync.sh terminal=false refresh=true"
+echo "打开日志 | bash=$PROJECT_DIR/scripts/open-log.sh terminal=false"
 echo '刷新 | refresh=true'
