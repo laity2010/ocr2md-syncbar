@@ -2,6 +2,8 @@
 set -u
 
 LOG_FILE="${OCR2MD_RCLONE_LOG:-$HOME/Library/Logs/ocr2md-sync/bridge-test.log}"
+STALE_AFTER_SECONDS="${OCR2MD_STALE_AFTER_SECONDS:-180}"
+NOW_EPOCH="${OCR2MD_NOW_EPOCH:-$(date +%s)}"
 
 emit() {
   printf 'STATUS=%s\n' "$1"
@@ -17,6 +19,15 @@ fi
 
 LAST_SUCCESS=$(grep 'Bisync successful' "$LOG_FILE" | tail -1 | sed -E 's/^([0-9]{4}\/[0-9]{2}\/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}).*/\1/' || true)
 [[ -n "$LAST_SUCCESS" ]] || LAST_SUCCESS="—"
+
+LAST_SUCCESS_AGE=-1
+if [[ "$LAST_SUCCESS" != "—" ]]; then
+  LAST_SUCCESS_EPOCH=$(date -j -f "%Y/%m/%d %H:%M:%S" "$LAST_SUCCESS" "+%s" 2>/dev/null || true)
+  if [[ -n "$LAST_SUCCESS_EPOCH" ]]; then
+    LAST_SUCCESS_AGE=$(( NOW_EPOCH - LAST_SUCCESS_EPOCH ))
+    (( LAST_SUCCESS_AGE < 0 )) && LAST_SUCCESS_AGE=0
+  fi
+fi
 
 # Every LaunchAgent invocation starts with this rclone notice on this bridge.
 # Parse only the newest invocation so old errors do not poison the current state.
@@ -64,7 +75,10 @@ elif (( HAS_CONFLICT )); then
   [[ -n "$DETAIL" ]] || DETAIL="同一文件在两端同时发生变化"
   emit "conflict" "检测到冲突" "$LAST_SUCCESS" "$DETAIL"
 elif (( HAS_SUCCESS )); then
-  if (( HAS_P1_TO_P2 && ! HAS_P2_TO_P1 )); then
+  if (( LAST_SUCCESS_AGE >= STALE_AFTER_SECONDS && LAST_SUCCESS_AGE >= 0 )); then
+    AGE_MINUTES=$(( LAST_SUCCESS_AGE / 60 ))
+    emit "stale" "同步停滞" "$LAST_SUCCESS" "最后成功已过去 ${AGE_MINUTES} 分钟"
+  elif (( HAS_P1_TO_P2 && ! HAS_P2_TO_P1 )); then
     emit "icloud_to_gdrive" "iCloud → Google Drive" "$LAST_SUCCESS" "本轮同步成功"
   elif (( HAS_P2_TO_P1 && ! HAS_P1_TO_P2 )); then
     emit "gdrive_to_icloud" "Google Drive → iCloud" "$LAST_SUCCESS" "本轮同步成功"

@@ -16,7 +16,7 @@ run_case() {
   local log="$TMP/$name.log"
   printf '%s\n' "$body" > "$log"
   local result actual_status
-  result=$(OCR2MD_RCLONE_LOG="$log" "$PARSER")
+  result=$(OCR2MD_RCLONE_LOG="$log" OCR2MD_NOW_EPOCH="$(date -j -f "%Y/%m/%d %H:%M:%S" "2026/08/30 13:01:00" "+%s")" "$PARSER")
   actual_status=$(printf '%s\n' "$result" | sed -n 's/^STATUS=//p' | head -1)
   if [[ "$actual_status" == "$expected" ]]; then
     printf 'PASS %-22s -> %s\n' "$name" "$actual_status"
@@ -54,6 +54,10 @@ run_case conflict conflict "$PREFIX
 run_case delete_protection delete_protection "$PREFIX
 2026/08/30 13:00:00 ERROR : Safety abort: too many deletes (>25%, 1 of 3) on Path1 /tmp/path1. Run with --force if desired.
 2026/08/30 13:00:00 NOTICE: Failed to bisync: too many deletes"
+
+run_case stale stale "$PREFIX
+2026/08/30 12:55:00 INFO  : No changes found
+2026/08/30 12:55:00 INFO  : Bisync successful"
 
 run_case error error "$PREFIX
 2026/08/30 13:00:00 ERROR : Bisync critical error: path1 and path2 are out of sync, run --resync to recover
