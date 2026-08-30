@@ -4,6 +4,8 @@ set -u
 LOG_FILE="${OCR2MD_RCLONE_LOG:-$HOME/Library/Logs/ocr2md-sync/bridge-test.log}"
 STALE_AFTER_SECONDS="${OCR2MD_STALE_AFTER_SECONDS:-180}"
 NOW_EPOCH="${OCR2MD_NOW_EPOCH:-$(date +%s)}"
+LAUNCH_AGENT_LABEL="${OCR2MD_LAUNCH_AGENT_LABEL:-com.ocr2md.rclone-bridge-test}"
+SERVICE_LOADED_OVERRIDE="${OCR2MD_SERVICE_LOADED:-}"
 
 emit() {
   printf 'STATUS=%s\n' "$1"
@@ -12,13 +14,29 @@ emit() {
   printf 'DETAIL=%s\n' "$4"
 }
 
-if [[ ! -r "$LOG_FILE" ]]; then
-  emit "error" "日志不可读" "—" "$LOG_FILE"
+SERVICE_LOADED=0
+if [[ -n "$SERVICE_LOADED_OVERRIDE" ]]; then
+  [[ "$SERVICE_LOADED_OVERRIDE" == "1" ]] && SERVICE_LOADED=1
+elif launchctl print "gui/$(id -u)/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
+  SERVICE_LOADED=1
+fi
+
+if [[ -r "$LOG_FILE" ]]; then
+  LAST_SUCCESS=$(grep 'Bisync successful' "$LOG_FILE" | tail -1 | sed -E 's/^([0-9]{4}\/[0-9]{2}\/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}).*/\1/' || true)
+  [[ -n "$LAST_SUCCESS" ]] || LAST_SUCCESS="—"
+else
+  LAST_SUCCESS="—"
+fi
+
+if (( ! SERVICE_LOADED )); then
+  emit "service_unavailable" "同步服务未运行" "$LAST_SUCCESS" "LaunchAgent 未加载：$LAUNCH_AGENT_LABEL"
   exit 0
 fi
 
-LAST_SUCCESS=$(grep 'Bisync successful' "$LOG_FILE" | tail -1 | sed -E 's/^([0-9]{4}\/[0-9]{2}\/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}).*/\1/' || true)
-[[ -n "$LAST_SUCCESS" ]] || LAST_SUCCESS="—"
+if [[ ! -r "$LOG_FILE" ]]; then
+  emit "error" "日志不可读" "$LAST_SUCCESS" "$LOG_FILE"
+  exit 0
+fi
 
 LAST_SUCCESS_AGE=-1
 if [[ "$LAST_SUCCESS" != "—" ]]; then

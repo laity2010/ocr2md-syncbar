@@ -17,6 +17,7 @@ case "$STATUS" in
   gdrive_to_icloud)   ICON="↓" ;;
   syncing)            ICON="↻" ;;
   stale)              ICON="!" ;;
+  service_unavailable) ICON="!" ;;
   conflict)           ICON="⚠︎" ;;
   delete_protection)  ICON="⛔︎" ;;
   *)                   ICON="!" ;;
