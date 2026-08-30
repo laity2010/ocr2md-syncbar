@@ -8,3 +8,5 @@
 : "${OCR2MD_ICLOUD_PATH:=$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/Your-Obsidian-Vault}"
 : "${OCR2MD_GDRIVE_PATH:=$HOME/Library/CloudStorage/GoogleDrive-your-account/Your-Google-Drive-Folder}"
 : "${OCR2MD_STALE_AFTER_SECONDS:=180}"
+# Optional display name for the managed directory pair. If unset, folder basenames are used.
+# : "${OCR2MD_SYNC_PAIR_LABEL:=My Obsidian Vault ↔ Google Drive Mirror}"

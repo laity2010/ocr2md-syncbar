@@ -46,6 +46,5 @@ echo "详情：$DETAIL"
 echo '---'
 echo "立即同步 | bash=$PROJECT_DIR/scripts/trigger-sync.sh terminal=false refresh=true"
 echo "打开日志 | bash=$PROJECT_DIR/scripts/open-log.sh terminal=false"
-echo "打开 iCloud 端 | bash=$PROJECT_DIR/scripts/open-sync-folder.sh param1=icloud terminal=false"
-echo "打开 Google Drive 端 | bash=$PROJECT_DIR/scripts/open-sync-folder.sh param1=gdrive terminal=false"
+"$PROJECT_DIR/scripts/list-managed-folders.sh"
 echo '刷新 | refresh=true'
