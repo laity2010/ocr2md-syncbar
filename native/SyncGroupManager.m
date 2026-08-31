@@ -1,4 +1,5 @@
 #import "SyncGroupManager.h"
+#import "ExclusionEditor.h"
 
 @interface OCR2MDSyncGroupManager () <NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate>
 @property(nonatomic,strong) NSURL *configURL;
@@ -14,6 +15,9 @@
 @property(nonatomic,strong) NSButton *addDirectoryButton;
 @property(nonatomic,strong) NSButton *removeDirectoryButton;
 @property(nonatomic,strong) NSButton *changeDirectoryButton;
+@property(nonatomic,strong) NSMutableDictionary<NSString *, NSString *> *fileCounts;
+@property(nonatomic,strong) NSMutableSet<NSString *> *fileCountLoading;
+@property(nonatomic,strong) OCR2MDExclusionEditor *exclusionEditor;
 @end
 
 @implementation OCR2MDSyncGroupManager
@@ -23,6 +27,8 @@
     if (self) {
         _configURL = configURL;
         _legacyProfileURL = legacyProfileURL;
+        _fileCounts = [NSMutableDictionary dictionary];
+        _fileCountLoading = [NSMutableSet set];
         [self loadConfig];
     }
     return self;
@@ -31,7 +37,8 @@
 - (NSMutableDictionary *)newDirectoryWithPath:(NSString *)path {
     return [@{
         @"id": [NSUUID UUID].UUIDString,
-        @"path": path ?: @""
+        @"path": path ?: @"",
+        @"excludes": [NSMutableArray array]
     } mutableCopy];
 }
 
@@ -62,6 +69,16 @@
     id existing = group[@"directories"];
     if ([existing isKindOfClass:[NSArray class]]) {
         if (![existing isKindOfClass:[NSMutableArray class]]) group[@"directories"] = [(NSArray *)existing mutableCopy];
+        NSMutableArray *directories = group[@"directories"];
+        for (NSUInteger i = 0; i < directories.count; i++) {
+            id rawDirectory = directories[i];
+            NSMutableDictionary *directory = [rawDirectory isKindOfClass:[NSMutableDictionary class]] ? rawDirectory : [rawDirectory mutableCopy];
+            if (!directory) continue;
+            directories[i] = directory;
+            id excludes = directory[@"excludes"];
+            if (![excludes isKindOfClass:[NSArray class]]) directory[@"excludes"] = [NSMutableArray array];
+            else if (![excludes isKindOfClass:[NSMutableArray class]]) directory[@"excludes"] = [(NSArray *)excludes mutableCopy];
+        }
         return;
     }
 
@@ -99,6 +116,10 @@
                     }
                     NSMutableDictionary *group = rawGroup;
                     if (!group[@"directories"]) needsSave = YES;
+                    NSArray *beforeDirectories = [group[@"directories"] isKindOfClass:[NSArray class]] ? group[@"directories"] : @[];
+                    for (NSDictionary *directory in beforeDirectories) {
+                        if (![directory[@"excludes"] isKindOfClass:[NSArray class]]) needsSave = YES;
+                    }
                     [self migrateGroupToDirectoryModel:group];
                 }
                 NSNumber *version = ((NSDictionary *)obj)[@"version"];
@@ -151,6 +172,7 @@
         [self.groupsTable selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
     }
     [self refreshSelectionUI];
+    [self refreshFileCounts];
     [NSApp activateIgnoringOtherApps:YES];
     [self.window makeKeyAndOrderFront:nil];
 }
@@ -168,12 +190,12 @@
 }
 
 - (void)buildWindow {
-    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 900, 540)
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1120, 560)
                                               styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable)
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
     self.window.title = @"Unison 同步目录组";
-    self.window.minSize = NSMakeSize(720, 440);
+    self.window.minSize = NSMakeSize(920, 460);
     self.window.delegate = self;
     [self.window center];
 
@@ -235,10 +257,31 @@
     self.directoriesTable = [[NSTableView alloc] init];
     NSTableColumn *directoryColumn = [[NSTableColumn alloc] initWithIdentifier:@"directory"];
     directoryColumn.title = @"目录";
-    directoryColumn.width = 590;
+    directoryColumn.width = 500;
     directoryColumn.minWidth = 260;
     directoryColumn.resizingMask = NSTableColumnAutoresizingMask;
     [self.directoriesTable addTableColumn:directoryColumn];
+
+    NSTableColumn *fileCountColumn = [[NSTableColumn alloc] initWithIdentifier:@"fileCount"];
+    fileCountColumn.title = @"文件数";
+    fileCountColumn.width = 82;
+    fileCountColumn.minWidth = 72;
+    fileCountColumn.maxWidth = 110;
+    [self.directoriesTable addTableColumn:fileCountColumn];
+
+    NSTableColumn *syncTypeColumn = [[NSTableColumn alloc] initWithIdentifier:@"syncType"];
+    syncTypeColumn.title = @"同步类型";
+    syncTypeColumn.width = 92;
+    syncTypeColumn.minWidth = 82;
+    syncTypeColumn.maxWidth = 120;
+    [self.directoriesTable addTableColumn:syncTypeColumn];
+
+    NSTableColumn *excludeColumn = [[NSTableColumn alloc] initWithIdentifier:@"exclude"];
+    excludeColumn.title = @"排除";
+    excludeColumn.width = 112;
+    excludeColumn.minWidth = 100;
+    excludeColumn.maxWidth = 145;
+    [self.directoriesTable addTableColumn:excludeColumn];
     self.directoriesTable.dataSource = self;
     self.directoriesTable.delegate = self;
     self.directoriesTable.rowHeight = 30;
@@ -265,7 +308,7 @@
     self.summaryLabel.textColor = [NSColor secondaryLabelColor];
     [right addSubview:self.summaryLabel];
 
-    NSTextField *hint = [NSTextField wrappingLabelWithString:@"同一组中的所有目录最终保持一致。底层执行时会自动以组内第一个目录为枢纽，依次同步其他目录。当前版本只管理配置，不会改变正在运行的 ocr2md 同步任务。"];
+    NSTextField *hint = [NSTextField wrappingLabelWithString:@"同一组中的目录自动保持一致。每个目录可设置自己的排除列表；配置保存后会在下一轮同步生效。系统级安全排除始终保留。"];
     hint.translatesAutoresizingMaskIntoConstraints = NO;
     hint.textColor = [NSColor secondaryLabelColor];
     hint.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
@@ -327,6 +370,69 @@
         [hint.topAnchor constraintEqualToAnchor:self.summaryLabel.bottomAnchor constant:8],
         [hint.bottomAnchor constraintLessThanOrEqualToAnchor:right.bottomAnchor]
     ]];
+}
+
+- (void)refreshFileCounts {
+    [self.fileCounts removeAllObjects];
+    [self.fileCountLoading removeAllObjects];
+    for (NSDictionary *directory in [self selectedDirectories]) {
+        NSString *path = [directory[@"path"] isKindOfClass:[NSString class]] ? directory[@"path"] : @"";
+        if (path.length) [self requestFileCountForPath:path];
+    }
+}
+
+- (void)requestFileCountForPath:(NSString *)path {
+    if (!path.length || self.fileCounts[path] || [self.fileCountLoading containsObject:path]) return;
+    [self.fileCountLoading addObject:path];
+    self.fileCounts[path] = @"…";
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSFileManager *fm = [[NSFileManager alloc] init];
+        NSURL *root = [NSURL fileURLWithPath:path isDirectory:YES];
+        NSDirectoryEnumerator *enumerator = [fm enumeratorAtURL:root
+                                    includingPropertiesForKeys:@[NSURLIsRegularFileKey]
+                                                       options:NSDirectoryEnumerationSkipsPackageDescendants
+                                                  errorHandler:^BOOL(NSURL *url, NSError *error) { return YES; }];
+        NSUInteger count = 0;
+        for (NSURL *url in enumerator) {
+            NSNumber *regular = nil;
+            [url getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
+            if (regular.boolValue) count++;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf.fileCountLoading removeObject:path];
+            strongSelf.fileCounts[path] = [NSNumberFormatter localizedStringFromNumber:@(count) numberStyle:NSNumberFormatterDecimalStyle];
+            [strongSelf.directoriesTable reloadData];
+        });
+    });
+}
+
+- (NSArray<NSString *> *)excludesForDirectory:(NSDictionary *)directory {
+    id excludes = directory[@"excludes"];
+    return [excludes isKindOfClass:[NSArray class]] ? excludes : @[];
+}
+
+- (void)manageExclusionsFromButton:(NSButton *)sender {
+    NSInteger row = sender.tag;
+    NSMutableArray *directories = [self selectedDirectories];
+    if (row < 0 || row >= (NSInteger)directories.count) return;
+    [self.directoriesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+    NSMutableDictionary *directory = directories[(NSUInteger)row];
+    NSString *path = [directory[@"path"] isKindOfClass:[NSString class]] ? directory[@"path"] : @"";
+    NSArray *items = [self excludesForDirectory:directory];
+    __weak typeof(self) weakSelf = self;
+    self.exclusionEditor = [[OCR2MDExclusionEditor alloc] initWithRootPath:path items:items saveHandler:^(NSArray<NSString *> *newItems) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        directory[@"excludes"] = [newItems mutableCopy];
+        [strongSelf saveConfig];
+        [strongSelf.directoriesTable reloadData];
+        [strongSelf refreshSelectionUI];
+    }];
+    [self.exclusionEditor runModal];
+    self.exclusionEditor = nil;
 }
 
 - (NSMutableDictionary *)selectedGroup {
@@ -395,25 +501,63 @@
 }
 
 - (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
-    NSTextField *field = [tableView makeViewWithIdentifier:@"cell" owner:self];
-    if (!field) {
-        field = [NSTextField labelWithString:@""];
-        field.identifier = @"cell";
-        field.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    }
-
     if (tableView == self.groupsTable) {
+        NSTextField *field = [tableView makeViewWithIdentifier:@"groupCell" owner:self];
+        if (!field) {
+            field = [NSTextField labelWithString:@""];
+            field.identifier = @"groupCell";
+            field.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        }
         NSDictionary *group = self.groups[(NSUInteger)row];
         BOOL enabled = [group[@"enabled"] boolValue];
         NSUInteger count = [group[@"directories"] isKindOfClass:[NSArray class]] ? [group[@"directories"] count] : 0;
         field.stringValue = [NSString stringWithFormat:@"%@%@  (%lu)", enabled ? @"● " : @"○ ", group[@"name"] ?: @"未命名", (unsigned long)count];
         field.textColor = enabled ? [NSColor labelColor] : [NSColor secondaryLabelColor];
         field.toolTip = field.stringValue;
+        return field;
+    }
+
+    NSDictionary *directory = [self selectedDirectories][(NSUInteger)row];
+    NSString *path = [directory[@"path"] isKindOfClass:[NSString class]] ? directory[@"path"] : @"";
+    NSArray *excludes = [self excludesForDirectory:directory];
+    NSString *identifier = tableColumn.identifier;
+
+    if ([identifier isEqualToString:@"exclude"]) {
+        NSButton *button = [tableView makeViewWithIdentifier:@"excludeButton" owner:self];
+        if (!button) {
+            button = [NSButton buttonWithTitle:@"管理…" target:self action:@selector(manageExclusionsFromButton:)];
+            button.identifier = @"excludeButton";
+            button.bezelStyle = NSBezelStyleRounded;
+            button.controlSize = NSControlSizeSmall;
+        }
+        button.target = self;
+        button.action = @selector(manageExclusionsFromButton:);
+        button.tag = row;
+        button.title = excludes.count ? [NSString stringWithFormat:@"管理… (%lu)", (unsigned long)excludes.count] : @"管理…";
+        button.toolTip = excludes.count ? [NSString stringWithFormat:@"%lu 个自定义排除项", (unsigned long)excludes.count] : @"管理这个目录的排除列表";
+        return button;
+    }
+
+    NSString *cellID = [NSString stringWithFormat:@"%@Cell", identifier ?: @"directory"];
+    NSTextField *field = [tableView makeViewWithIdentifier:cellID owner:self];
+    if (!field) {
+        field = [NSTextField labelWithString:@""];
+        field.identifier = cellID;
+        field.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    }
+    field.textColor = [NSColor labelColor];
+    if ([identifier isEqualToString:@"fileCount"]) {
+        if (!self.fileCounts[path]) [self requestFileCountForPath:path];
+        field.stringValue = self.fileCounts[path] ?: @"…";
+        field.alignment = NSTextAlignmentRight;
+        field.toolTip = @"目录中的实际文件数（异步统计）";
+    } else if ([identifier isEqualToString:@"syncType"]) {
+        field.stringValue = excludes.count ? @"有排除" : @"镜像";
+        field.alignment = NSTextAlignmentCenter;
+        field.toolTip = excludes.count ? @"此目录有自定义排除项" : @"此目录没有自定义排除项";
     } else {
-        NSDictionary *directory = [self selectedDirectories][(NSUInteger)row];
-        NSString *path = [directory[@"path"] isKindOfClass:[NSString class]] ? directory[@"path"] : @"";
         field.stringValue = path;
-        field.textColor = [NSColor labelColor];
+        field.alignment = NSTextAlignmentLeft;
         field.toolTip = path;
     }
     return field;
@@ -424,6 +568,7 @@
         [self.directoriesTable deselectAll:nil];
         [self.directoriesTable reloadData];
         [self refreshSelectionUI];
+        [self refreshFileCounts];
     } else if (notification.object == self.directoriesTable) {
         // Do not reload the table here: reloadData clears the selection we just made.
         [self updateDirectoryActionState];
@@ -475,7 +620,7 @@
     NSString *name = self.groups[(NSUInteger)row][@"name"] ?: @"此同步组";
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = [NSString stringWithFormat:@"删除“%@”？", name];
-    alert.informativeText = @"这里只会删除目录组配置；当前正式 Unison runner 暂时不会被改动。";
+    alert.informativeText = @"删除后，这个目录组会从下一轮自动同步中移除。各目录和其中的文件不会被删除。";
     [alert addButtonWithTitle:@"删除"];
     [alert addButtonWithTitle:@"取消"];
     [NSApp activateIgnoringOtherApps:YES];
@@ -550,6 +695,7 @@
         [self.directoriesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
         [self.groupsTable reloadData];
         [self refreshSelectionUI];
+        [self requestFileCountForPath:path];
     }];
 }
 
@@ -659,15 +805,19 @@
         [self showNeedDirectorySelection];
         return;
     }
+    NSString *oldPath = [directory[@"path"] isKindOfClass:[NSString class]] ? directory[@"path"] : @"";
     [self chooseDirectoryWithMessage:@"更改这个目录" completion:^(NSString *path) {
         if ([self directoryPathAlreadyExists:path excludingIndex:row]) {
             [self showDuplicateDirectoryAlert:path];
             return;
         }
         directory[@"path"] = path;
+        [self.fileCounts removeObjectForKey:oldPath];
+        [self.fileCounts removeObjectForKey:path];
         [self saveConfig];
         [self.directoriesTable reloadData];
         [self refreshSelectionUI];
+        [self requestFileCountForPath:path];
     }];
 }
 
