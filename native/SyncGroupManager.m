@@ -18,6 +18,7 @@
 @property(nonatomic,strong) NSMutableDictionary<NSString *, NSString *> *fileCounts;
 @property(nonatomic,strong) NSMutableSet<NSString *> *fileCountLoading;
 @property(nonatomic,strong) OCR2MDExclusionEditor *exclusionEditor;
+@property(nonatomic,assign) NSUInteger fileCountGeneration;
 @end
 
 @implementation OCR2MDSyncGroupManager
@@ -63,6 +64,23 @@
         if (roots.count == 2) break;
     }
     return roots;
+}
+
+- (NSArray<NSString *> *)legacyPathExcludes {
+    NSString *text = [NSString stringWithContentsOfURL:self.legacyProfileURL encoding:NSUTF8StringEncoding error:nil];
+    if (!text.length) return @[];
+    NSMutableArray<NSString *> *items = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSString *raw in [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (![line hasPrefix:@"ignore = Path "]) continue;
+        NSString *value = [[line substringFromIndex:14] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (value.length && ![seen containsObject:value]) {
+            [seen addObject:value];
+            [items addObject:value];
+        }
+    }
+    return items;
 }
 
 - (void)migrateGroupToDirectoryModel:(NSMutableDictionary *)group {
@@ -123,7 +141,28 @@
                     [self migrateGroupToDirectoryModel:group];
                 }
                 NSNumber *version = ((NSDictionary *)obj)[@"version"];
-                if (version.integerValue != 2) needsSave = YES;
+                if (version.integerValue < 3) {
+                    // The legacy ocr2md Path ignores belong to the Google Drive replica.
+                    // Make them explicit on the second legacy directory instead of
+                    // silently applying them to every directory in the group.
+                    NSArray<NSString *> *legacyExcludes = [self legacyPathExcludes];
+                    for (NSMutableDictionary *group in self.groups) {
+                        NSMutableArray *directories = [group[@"directories"] isKindOfClass:[NSMutableArray class]] ? group[@"directories"] : nil;
+                        if (![group[@"legacyProfile"] isKindOfClass:[NSString class]] || directories.count < 2 || !legacyExcludes.count) continue;
+                        NSMutableDictionary *directory = directories[1];
+                        NSMutableArray *excludes = [directory[@"excludes"] isKindOfClass:[NSMutableArray class]] ? directory[@"excludes"] : [NSMutableArray array];
+                        NSMutableSet *seen = [NSMutableSet setWithArray:excludes];
+                        for (NSString *value in legacyExcludes) {
+                            if (![seen containsObject:value]) {
+                                [excludes addObject:value];
+                                [seen addObject:value];
+                            }
+                        }
+                        directory[@"excludes"] = excludes;
+                    }
+                    needsSave = YES;
+                }
+                if (version.integerValue != 3) needsSave = YES;
                 if (needsSave) [self saveConfig];
                 return;
             }
@@ -146,7 +185,7 @@
 - (void)saveConfig {
     NSFileManager *fm = [NSFileManager defaultManager];
     [fm createDirectoryAtURL:[self.configURL URLByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
-    NSDictionary *document = @{ @"version": @2, @"groups": self.groups ?: @[] };
+    NSDictionary *document = @{ @"version": @3, @"groups": self.groups ?: @[] };
     NSData *data = [NSJSONSerialization dataWithJSONObject:document options:(NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys) error:nil];
     if (data.length) [data writeToURL:self.configURL atomically:YES];
 }
@@ -373,35 +412,72 @@
 }
 
 - (void)refreshFileCounts {
+    self.fileCountGeneration++;
     [self.fileCounts removeAllObjects];
     [self.fileCountLoading removeAllObjects];
     for (NSDictionary *directory in [self selectedDirectories]) {
-        NSString *path = [directory[@"path"] isKindOfClass:[NSString class]] ? directory[@"path"] : @"";
-        if (path.length) [self requestFileCountForPath:path];
+        [self requestFileCountForDirectory:directory];
     }
 }
 
-- (void)requestFileCountForPath:(NSString *)path {
+- (BOOL)relativePath:(NSString *)relativePath isExcludedBy:(NSArray<NSString *> *)excludes {
+    NSString *relative = [relativePath stringByStandardizingPath];
+    if ([relative isEqualToString:@"."]) relative = @"";
+    for (NSString *raw in excludes) {
+        if (![raw isKindOfClass:[NSString class]]) continue;
+        NSString *value = [[raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] stringByStandardizingPath];
+        while ([value hasPrefix:@"/"]) value = [value substringFromIndex:1];
+        while ([value hasSuffix:@"/"] && value.length > 1) value = [value substringToIndex:value.length - 1];
+        if (!value.length || [value isEqualToString:@"."]) continue;
+        if ([relative isEqualToString:value] || [relative hasPrefix:[value stringByAppendingString:@"/"]]) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)isEngineMetadataRelativePath:(NSString *)relativePath {
+    for (NSString *component in [relativePath pathComponents]) {
+        if ([component isEqualToString:@".DS_Store"] || [component isEqualToString:@".sync.ffs_db"] || [component hasPrefix:@"._"]) return YES;
+        if ([component hasPrefix:@".unison."] && [component hasSuffix:@".unison.tmp"]) return YES;
+    }
+    return NO;
+}
+
+- (void)requestFileCountForDirectory:(NSDictionary *)directory {
+    NSString *path = [directory[@"path"] isKindOfClass:[NSString class]] ? directory[@"path"] : @"";
+    NSArray<NSString *> *excludes = [[self excludesForDirectory:directory] copy];
     if (!path.length || self.fileCounts[path] || [self.fileCountLoading containsObject:path]) return;
     [self.fileCountLoading addObject:path];
     self.fileCounts[path] = @"…";
+    NSUInteger generation = self.fileCountGeneration;
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSFileManager *fm = [[NSFileManager alloc] init];
         NSURL *root = [NSURL fileURLWithPath:path isDirectory:YES];
-        NSDirectoryEnumerator *enumerator = [fm enumeratorAtURL:root
-                                    includingPropertiesForKeys:@[NSURLIsRegularFileKey]
-                                                       options:NSDirectoryEnumerationSkipsPackageDescendants
-                                                  errorHandler:^BOOL(NSURL *url, NSError *error) { return YES; }];
+        NSDirectoryEnumerator<NSURL *> *enumerator = [fm enumeratorAtURL:root
+                                              includingPropertiesForKeys:@[NSURLIsRegularFileKey, NSURLIsDirectoryKey]
+                                                                 options:NSDirectoryEnumerationSkipsPackageDescendants
+                                                            errorHandler:^BOOL(NSURL *url, NSError *error) { return YES; }];
         NSUInteger count = 0;
+        NSString *rootPath = root.path;
         for (NSURL *url in enumerator) {
+            NSString *fullPath = url.path;
+            if (![fullPath hasPrefix:rootPath]) continue;
+            NSString *relative = [fullPath substringFromIndex:rootPath.length];
+            while ([relative hasPrefix:@"/"]) relative = [relative substringFromIndex:1];
+            NSNumber *isDirectory = nil;
             NSNumber *regular = nil;
+            [url getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+            BOOL ignored = [weakSelf isEngineMetadataRelativePath:relative] || [weakSelf relativePath:relative isExcludedBy:excludes];
+            if (ignored) {
+                if (isDirectory.boolValue) [enumerator skipDescendants];
+                continue;
+            }
             [url getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
             if (regular.boolValue) count++;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) strongSelf = weakSelf;
-            if (!strongSelf) return;
+            if (!strongSelf || generation != strongSelf.fileCountGeneration) return;
             [strongSelf.fileCountLoading removeObject:path];
             strongSelf.fileCounts[path] = [NSNumberFormatter localizedStringFromNumber:@(count) numberStyle:NSNumberFormatterDecimalStyle];
             [strongSelf.directoriesTable reloadData];
@@ -430,6 +506,7 @@
         [strongSelf saveConfig];
         [strongSelf.directoriesTable reloadData];
         [strongSelf refreshSelectionUI];
+        [strongSelf refreshFileCounts];
     }];
     [self.exclusionEditor runModal];
     self.exclusionEditor = nil;
@@ -547,10 +624,10 @@
     }
     field.textColor = [NSColor labelColor];
     if ([identifier isEqualToString:@"fileCount"]) {
-        if (!self.fileCounts[path]) [self requestFileCountForPath:path];
+        if (!self.fileCounts[path]) [self requestFileCountForDirectory:directory];
         field.stringValue = self.fileCounts[path] ?: @"…";
         field.alignment = NSTextAlignmentRight;
-        field.toolTip = @"目录中的实际文件数（异步统计）";
+        field.toolTip = @"参与同步的有效文件数（不计系统/Unison 元数据，并应用本目录排除）";
     } else if ([identifier isEqualToString:@"syncType"]) {
         field.stringValue = excludes.count ? @"有排除" : @"镜像";
         field.alignment = NSTextAlignmentCenter;
@@ -688,14 +765,15 @@
             [self showDuplicateDirectoryAlert:path];
             return;
         }
-        [directories addObject:[self newDirectoryWithPath:path]];
+        NSMutableDictionary *directory = [self newDirectoryWithPath:path];
+        [directories addObject:directory];
         [self saveConfig];
         [self.directoriesTable reloadData];
         NSInteger row = (NSInteger)directories.count - 1;
         [self.directoriesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
         [self.groupsTable reloadData];
         [self refreshSelectionUI];
-        [self requestFileCountForPath:path];
+        [self requestFileCountForDirectory:directory];
     }];
 }
 
@@ -817,7 +895,7 @@
         [self saveConfig];
         [self.directoriesTable reloadData];
         [self refreshSelectionUI];
-        [self requestFileCountForPath:path];
+        [self requestFileCountForDirectory:directory];
     }];
 }
 
