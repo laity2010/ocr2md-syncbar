@@ -7,7 +7,7 @@ CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 rm -rf "$APP"
 mkdir -p "$MACOS"
-xcrun clang -fobjc-arc -framework Cocoa "$ROOT/native/main.m" -o "$MACOS/OCR2MDSyncStatus"
+xcrun clang -fobjc-arc -framework Cocoa "$ROOT/native/main.m" "$ROOT/native/SyncGroupManager.m" -o "$MACOS/OCR2MDSyncStatus"
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
