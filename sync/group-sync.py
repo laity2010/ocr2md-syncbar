@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,11 @@ HOSTNAME = 'ocr2md-mac'
 
 CHANGE_RE = re.compile(r'(<----|---->|<-\?->)|\b(?:new file|changed|deleted)\b|Propagating updates|\[BGN\]\s+(?:Copying|Deleting|Updating)', re.I)
 CONFLICT_RE = re.compile(r'<-\?->')
+PATH_TOPOLOGY_RE = re.compile(r'\b(?:new file|new dir|deleted)\b', re.I)
+CONFLICT_PATH_RE = re.compile(r'^\s*skipped:\s+(.+?)\s+\(')
+CONFLICTS = SYNCROOT / 'unison-conflicts.json'
+FULL_SCAN_STATE = SYNCROOT / 'full-scan-state.json'
+FULL_SCAN_INTERVAL_SECONDS = 60
 
 
 def now():
@@ -70,10 +76,102 @@ def log(text=''):
         f.flush()
 
 
+def write_conflicts(group_name, group_id, profile_name, left, right, paths):
+    doc = {
+        'version': 1,
+        'generated_at': now(),
+        'group': group_name,
+        'group_id': group_id,
+        'profile': profile_name,
+        'left_root': str(left),
+        'right_root': str(right),
+        'conflicts': [{'path': p} for p in paths],
+    }
+    atomic_write(CONFLICTS, json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + '\n')
+
+
+def clear_conflicts():
+    try:
+        CONFLICTS.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def load_full_scan_state():
+    if not FULL_SCAN_STATE.is_file():
+        return {'version': 1, 'profiles': {}}
+    try:
+        doc = json.loads(FULL_SCAN_STATE.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        log(f'FULL_SCAN state unreadable; rebuilding: {type(exc).__name__}: {exc}')
+        return {'version': 1, 'profiles': {}}
+    if doc.get('version') != 1 or not isinstance(doc.get('profiles'), dict):
+        log('FULL_SCAN state has unsupported format; rebuilding')
+        return {'version': 1, 'profiles': {}}
+    return doc
+
+
+def save_full_scan_state(doc):
+    atomic_write(FULL_SCAN_STATE, json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + '\n')
+
+
+def google_drive_provider_key(root: Path):
+    parts = root.parts
+    for index, part in enumerate(parts):
+        if part.startswith('GoogleDrive-') and index > 0 and parts[index - 1] == 'CloudStorage':
+            return str(Path(*parts[:index + 1]))
+    return None
+
+
+def claim_periodic_discovery_scan(left: Path, right: Path, one_way, assigned_providers):
+    # A bidirectional edge can discover paths materialized on either Google Drive
+    # side. A one-way version-backup edge only needs discovery when Google Drive is
+    # the source; changes made inside the backup are intentionally ignored.
+    roots = (left,) if one_way else (left, right)
+    provider_keys = []
+    for root in roots:
+        key = google_drive_provider_key(root)
+        if key and key not in provider_keys:
+            provider_keys.append(key)
+    unassigned = [key for key in provider_keys if key not in assigned_providers]
+    if not unassigned:
+        return False
+    assigned_providers.update(unassigned)
+    return True
+
+
+def choose_full_scan(profile_name, enabled, state, now_epoch=None):
+    if not enabled:
+        return False, 'fastcheck'
+    now_epoch = time.time() if now_epoch is None else now_epoch
+    entry = state.get('profiles', {}).get(profile_name)
+    if not isinstance(entry, dict) or not isinstance(entry.get('last_success_epoch'), (int, float)):
+        return True, 'provider-baseline-missing'
+    elapsed = now_epoch - float(entry['last_success_epoch'])
+    if elapsed < 0 or elapsed >= FULL_SCAN_INTERVAL_SECONDS:
+        return True, 'provider-periodic-safety-scan'
+    return False, 'fastcheck'
+
+
+def apply_group_convergence_scan(full_scan, scan_reason, force_full_remainder):
+    if force_full_remainder and not full_scan:
+        return True, 'group-path-convergence'
+    return full_scan, scan_reason
+
+
+def record_full_scan_success(profile_name, state, now_epoch=None):
+    now_epoch = time.time() if now_epoch is None else now_epoch
+    state.setdefault('profiles', {})[profile_name] = {
+        'last_success_epoch': now_epoch,
+        'last_success_at': datetime.fromtimestamp(now_epoch).strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    save_full_scan_state(state)
+
+
 def load_config():
     with CONFIG.open('r', encoding='utf-8') as f:
         doc = json.load(f)
-    if doc.get('version') not in (2, 3):
+    if doc.get('version') not in (2, 3, 4):
         raise RuntimeError(f'unsupported sync-groups.json version: {doc.get("version")}')
     groups = [g for g in doc.get('groups', []) if g.get('enabled')]
     if not groups:
@@ -118,6 +216,14 @@ def normalized_excludes(directory, group_name, root):
     return result
 
 
+
+
+def normalized_mode(directory, group_name, root):
+    mode = directory.get('mode') or 'mirror'
+    if mode not in ('mirror', 'version_backup'):
+        raise RuntimeError(f'group {group_name!r} has invalid mode {mode!r} for {root}')
+    return mode
+
 def validate_group(group):
     name = str(group.get('name') or '未命名同步组')
     gid = str(group.get('id') or '')
@@ -126,6 +232,9 @@ def validate_group(group):
         raise RuntimeError(f'group {name!r} needs at least 2 directories')
     roots = [normalized_root(d.get('path')) for d in dirs]
     excludes = [normalized_excludes(d, name, root) for d, root in zip(dirs, roots)]
+    modes = [normalized_mode(d, name, root) for d, root in zip(dirs, roots)]
+    if not any(mode == 'mirror' for mode in modes):
+        raise RuntimeError(f'group {name!r} needs at least one working mirror directory')
     normalized = [os.path.normcase(str(p)) for p in roots]
     if len(set(normalized)) != len(normalized):
         raise RuntimeError(f'group {name!r} contains duplicate directories')
@@ -144,7 +253,7 @@ def validate_group(group):
                 raise RuntimeError(f'group {name!r} contains nested roots: {b} -> {a}')
             except ValueError:
                 pass
-    return name, gid, roots, excludes
+    return name, gid, roots, excludes, modes
 
 
 def engine_ignore_preferences():
@@ -185,20 +294,35 @@ def safe_profile_component(value):
     return (s[:24] or 'group')
 
 
-def make_profiles(group, roots, excludes):
+def make_profiles(group, roots, excludes, modes):
     gid = safe_profile_component(str(group.get('id') or group.get('name') or 'group'))
     prefs = preferences_for_group(group)
     profiles = []
 
-    # Keep the normal no-exclusion case as the efficient hub-and-spoke topology.
-    # When any directory has custom exclusions, add the spoke-to-spoke edges too.
-    # This preserves directory-local exclusion semantics: a path excluded from one
-    # replica can still synchronize among all other replicas that do not exclude it.
-    pairs = [(0, j) for j in range(1, len(roots))]
-    if any(excludes):
-        pairs.extend((i, j) for i in range(1, len(roots)) for j in range(i + 1, len(roots)))
+    working = [i for i, mode in enumerate(modes) if mode == 'mirror']
+    backups = [i for i, mode in enumerate(modes) if mode == 'version_backup']
+    assigned_discovery_providers = set()
 
-    for i, j in pairs:
+    # Working replicas converge bidirectionally. Preserve the efficient hub-and-spoke
+    # topology unless directory-local exclusions require spoke-to-spoke edges.
+    pairs = []
+    if len(working) >= 2:
+        hub = working[0]
+        pairs.extend((hub, j, False) for j in working[1:])
+        if any(excludes[i] for i in working):
+            pairs.extend(
+                (working[a], working[b], False)
+                for a in range(1, len(working))
+                for b in range(a + 1, len(working))
+            )
+
+    # A version-backup replica receives from every working replica so directory-local
+    # exclusions remain meaningful, but it is never a source. `force = source` is
+    # Unison's mirroring mode and prevents changes made in the backup from propagating out.
+    for backup_index in backups:
+        pairs.extend((source_index, backup_index, True) for source_index in working)
+
+    for i, j, one_way in pairs:
         left, right = roots[i], roots[j]
         if i == 0:
             # Preserve existing archive/profile names for current hub edges.
@@ -219,16 +343,27 @@ def make_profiles(group, roots, excludes):
             lines.extend(f'ignore = Path {value}' for value in edge_excludes)
             exclude_prefs = '\n' + '\n'.join(lines) + '\n'
 
+        direction_prefs = ''
+        if one_way:
+            direction_prefs = (
+                '\n# Version-backup edge: changes only flow from the working replica to the backup.\n'
+                f'force = {left}\n'
+            )
+
         content = (
             f'# AUTO-GENERATED by ocr2md group sync. Do not edit.\n'
             f'root = {left}\n'
             f'root = {right}\n\n'
             f'{prefs}'
             f'{exclude_prefs}'
+            f'{direction_prefs}'
         )
         atomic_write(profile_path, content)
         os.chmod(profile_path, 0o600)
-        profiles.append((profile_name, left, right))
+        periodic_full_scan = claim_periodic_discovery_scan(
+            left, right, one_way, assigned_discovery_providers
+        )
+        profiles.append((profile_name, left, right, one_way, periodic_full_scan))
     return profiles
 
 
@@ -253,7 +388,7 @@ def test_profile(profile_name):
         raise RuntimeError(f'profile {profile_name} failed -testserver rc={cp.returncode}: {cp.stdout[-2000:]}')
 
 
-def run_edge(profile_name, group_name, group_id, pass_no, current, total, hub, spoke, start_time):
+def run_edge(profile_name, group_name, group_id, pass_no, current, total, hub, spoke, start_time, full_scan=False, scan_reason='fastcheck'):
     state_base = dict(
         last_start=start_time,
         last_end='',
@@ -268,12 +403,18 @@ def run_edge(profile_name, group_name, group_id, pass_no, current, total, hub, s
         edge_from=str(hub),
         edge_to=str(spoke),
         profile=profile_name,
+        scan_mode='full' if full_scan else 'fast',
+        scan_reason=scan_reason,
     )
     write_state(**state_base)
     log(f'\n===== {now()} GROUP={group_name} PASS={pass_no} PROGRESS={current}/{total} PROFILE={profile_name} =====')
+    log(f'FULL_SCAN mode={"full" if full_scan else "fast"} reason={scan_reason}')
+    command = [str(UNISON_BIN), profile_name, '-batch', '-auto']
+    if full_scan:
+        command.extend(['-fastcheck', 'false'])
 
     proc = subprocess.Popen(
-        [str(UNISON_BIN), profile_name, '-batch', '-auto'],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -283,19 +424,30 @@ def run_edge(profile_name, group_name, group_id, pass_no, current, total, hub, s
     )
     saw_change = False
     saw_conflict_text = False
+    saw_path_change = False
+    conflict_paths = []
+    conflict_seen = set()
     assert proc.stdout is not None
     for raw in proc.stdout:
         log(raw.rstrip('\n'))
         line = raw.replace('\r', ' ')
         if CONFLICT_RE.search(line):
             saw_conflict_text = True
+        if PATH_TOPOLOGY_RE.search(line):
+            saw_path_change = True
+        match = CONFLICT_PATH_RE.search(line)
+        if match:
+            path = match.group(1).strip()
+            if path and path not in conflict_seen:
+                conflict_seen.add(path)
+                conflict_paths.append(path)
         if CHANGE_RE.search(line) and 'Nothing to do' not in line:
             if not saw_change:
                 saw_change = True
                 state_base['phase'] = 'syncing'
                 write_state(**state_base)
     rc = proc.wait()
-    return rc, saw_change, saw_conflict_text
+    return rc, saw_change, saw_conflict_text, conflict_paths, saw_path_change
 
 
 def main():
@@ -314,35 +466,55 @@ def main():
     groups = load_config()
     plans = []
     for group in groups:
-        name, gid, roots, excludes = validate_group(group)
-        profiles = make_profiles(group, roots, excludes)
-        for profile_name, _, _ in profiles:
+        name, gid, roots, excludes, modes = validate_group(group)
+        profiles = make_profiles(group, roots, excludes, modes)
+        for profile_name, _, _, _, _ in profiles:
             test_profile(profile_name)
-        plans.append((group, name, gid, roots, excludes, profiles))
+        plans.append((group, name, gid, roots, excludes, modes, profiles))
 
     if args.validate_only:
-        for _, name, gid, roots, excludes, profiles in plans:
-            print(f'OK group={name} id={gid} dirs={len(roots)} edges={len(profiles)} excluded_dirs={sum(bool(x) for x in excludes)}')
-            for profile_name, hub, spoke in profiles:
-                print(f'  {profile_name}: {hub} <-> {spoke}')
+        for _, name, gid, roots, excludes, modes, profiles in plans:
+            print(f'OK group={name} id={gid} dirs={len(roots)} edges={len(profiles)} excluded_dirs={sum(bool(x) for x in excludes)} backups={sum(m == "version_backup" for m in modes)}')
+            for profile_name, left, right, one_way, periodic_full_scan in profiles:
+                arrow = '->' if one_way else '<->'
+                discovery = ' [periodic-full-scan]' if periodic_full_scan else ''
+                print(f'  {profile_name}: {left} {arrow} {right}{discovery}')
         return 0
 
+    full_scan_state = load_full_scan_state()
     overall_start = now()
     any_change = False
-    for _, name, gid, roots, excludes, profiles in plans:
+    for _, name, gid, roots, excludes, modes, profiles in plans:
         total = len(roots)
+        need_full_convergence_pass = False
         # Two sweeps make changes discovered on a later edge reach earlier edges
         # during the same launch, including the full-mesh case used for exclusions.
         for pass_no in (1, 2):
-            for edge_index, (profile_name, hub, spoke) in enumerate(profiles, start=2):
+            full_convergence_pass = pass_no == 2 and need_full_convergence_pass
+            for edge_index, (profile_name, hub, spoke, one_way, periodic_full_scan) in enumerate(profiles, start=2):
                 # On pass 1, progress reflects directories incorporated so far.
                 # On pass 2 the group is in final convergence, so keep N/N visible.
                 current = min(total, edge_index - 1) if pass_no == 1 else total
-                rc, changed, conflict_text = run_edge(
+                full_scan, scan_reason = choose_full_scan(
+                    profile_name, periodic_full_scan, full_scan_state
+                )
+                full_scan, scan_reason = apply_group_convergence_scan(
+                    full_scan, scan_reason, full_convergence_pass
+                )
+                rc, changed, conflict_text, conflict_paths, path_topology_changed = run_edge(
                     profile_name, name, gid, pass_no, current, total,
-                    hub, spoke, overall_start
+                    hub, spoke, overall_start, full_scan=full_scan, scan_reason=scan_reason
                 )
                 any_change = any_change or changed
+                if rc == 0 and not conflict_text and full_scan and periodic_full_scan:
+                    record_full_scan_success(profile_name, full_scan_state)
+                if rc == 0 and not conflict_text and path_topology_changed and pass_no == 1:
+                    need_full_convergence_pass = True
+                    log(f'FULL_SCAN escalation=next-pass-full-convergence trigger={profile_name}')
+                    # Do not let later edges act on a partially discovered path set.
+                    # The second sweep will rescan every edge in full mode from a
+                    # consistent starting point.
+                    break
                 if rc != 0 or conflict_text:
                     status = 'conflict_or_skipped' if rc == 1 or conflict_text else 'error'
                     end = now()
@@ -353,6 +525,8 @@ def main():
                         progress_total=total, edge_from=str(hub), edge_to=str(spoke),
                         profile=profile_name,
                     )
+                    if status == 'conflict_or_skipped':
+                        write_conflicts(name, gid, profile_name, hub, spoke, conflict_paths)
                     log(f'===== HALT {end} rc={rc} status={status} =====')
                     return 1 if status == 'conflict_or_skipped' else (rc or 2)
             # After the first sweep, all configured replicas have participated.
@@ -382,6 +556,7 @@ def main():
         profile='sync-groups',
         changed='yes' if any_change else 'no',
     )
+    clear_conflicts()
     log(f'===== {end} ALL GROUPS COMPLETE rc=0 status=ok changed={"yes" if any_change else "no"} =====')
     return 0
 

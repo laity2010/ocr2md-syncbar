@@ -39,6 +39,7 @@
     return [@{
         @"id": [NSUUID UUID].UUIDString,
         @"path": path ?: @"",
+        @"mode": @"mirror",
         @"excludes": [NSMutableArray array]
     } mutableCopy];
 }
@@ -96,6 +97,8 @@
             id excludes = directory[@"excludes"];
             if (![excludes isKindOfClass:[NSArray class]]) directory[@"excludes"] = [NSMutableArray array];
             else if (![excludes isKindOfClass:[NSMutableArray class]]) directory[@"excludes"] = [(NSArray *)excludes mutableCopy];
+            NSString *mode = [directory[@"mode"] isKindOfClass:[NSString class]] ? directory[@"mode"] : @"";
+            if (![mode isEqualToString:@"mirror"] && ![mode isEqualToString:@"version_backup"]) directory[@"mode"] = @"mirror";
         }
         return;
     }
@@ -137,6 +140,8 @@
                     NSArray *beforeDirectories = [group[@"directories"] isKindOfClass:[NSArray class]] ? group[@"directories"] : @[];
                     for (NSDictionary *directory in beforeDirectories) {
                         if (![directory[@"excludes"] isKindOfClass:[NSArray class]]) needsSave = YES;
+                        NSString *mode = [directory[@"mode"] isKindOfClass:[NSString class]] ? directory[@"mode"] : @"";
+                        if (![mode isEqualToString:@"mirror"] && ![mode isEqualToString:@"version_backup"]) needsSave = YES;
                     }
                     [self migrateGroupToDirectoryModel:group];
                 }
@@ -162,7 +167,7 @@
                     }
                     needsSave = YES;
                 }
-                if (version.integerValue != 3) needsSave = YES;
+                if (version.integerValue != 4) needsSave = YES;
                 if (needsSave) [self saveConfig];
                 return;
             }
@@ -185,7 +190,7 @@
 - (void)saveConfig {
     NSFileManager *fm = [NSFileManager defaultManager];
     [fm createDirectoryAtURL:[self.configURL URLByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
-    NSDictionary *document = @{ @"version": @3, @"groups": self.groups ?: @[] };
+    NSDictionary *document = @{ @"version": @4, @"groups": self.groups ?: @[] };
     NSData *data = [NSJSONSerialization dataWithJSONObject:document options:(NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys) error:nil];
     if (data.length) [data writeToURL:self.configURL atomically:YES];
 }
@@ -216,6 +221,11 @@
     [self.window makeKeyAndOrderFront:nil];
 }
 
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    [sender orderOut:nil];
+    return NO;
+}
+
 - (NSTextField *)label:(NSString *)text bold:(BOOL)bold {
     NSTextField *label = [NSTextField labelWithString:text];
     if (bold) label.font = [NSFont systemFontOfSize:[NSFont systemFontSize] weight:NSFontWeightSemibold];
@@ -235,6 +245,7 @@
                                                   defer:NO];
     self.window.title = @"Unison 同步目录组";
     self.window.minSize = NSMakeSize(920, 460);
+    self.window.releasedWhenClosed = NO;
     self.window.delegate = self;
     [self.window center];
 
@@ -347,7 +358,7 @@
     self.summaryLabel.textColor = [NSColor secondaryLabelColor];
     [right addSubview:self.summaryLabel];
 
-    NSTextField *hint = [NSTextField wrappingLabelWithString:@"同一组中的目录自动保持一致。每个目录可设置自己的排除列表；配置保存后会在下一轮同步生效。系统级安全排除始终保留。"];
+    NSTextField *hint = [NSTextField wrappingLabelWithString:@"镜像目录互相同步；版本备份只接收其他目录的更新，不会回写。每个目录仍可设置自己的排除列表；配置保存后在下一轮同步生效。"];
     hint.translatesAutoresizingMaskIntoConstraints = NO;
     hint.textColor = [NSColor secondaryLabelColor];
     hint.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
@@ -490,6 +501,22 @@
     return [excludes isKindOfClass:[NSArray class]] ? excludes : @[];
 }
 
+- (NSString *)modeForDirectory:(NSDictionary *)directory {
+    NSString *mode = [directory[@"mode"] isKindOfClass:[NSString class]] ? directory[@"mode"] : @"mirror";
+    return [mode isEqualToString:@"version_backup"] ? @"version_backup" : @"mirror";
+}
+
+- (void)syncTypeChangedFromPopup:(NSPopUpButton *)sender {
+    NSInteger row = sender.tag;
+    NSMutableArray *directories = [self selectedDirectories];
+    if (row < 0 || row >= (NSInteger)directories.count) return;
+    NSMutableDictionary *directory = directories[(NSUInteger)row];
+    directory[@"mode"] = sender.indexOfSelectedItem == 1 ? @"version_backup" : @"mirror";
+    [self saveConfig];
+    [self.directoriesTable reloadData];
+    [self refreshSelectionUI];
+}
+
 - (void)manageExclusionsFromButton:(NSButton *)sender {
     NSInteger row = sender.tag;
     NSMutableArray *directories = [self selectedDirectories];
@@ -567,7 +594,16 @@
     } else if (count < 2) {
         self.summaryLabel.stringValue = [NSString stringWithFormat:@"%@ · %lu 个目录 · 至少需要 2 个目录", [group[@"enabled"] boolValue] ? @"已启用" : @"已停用", (unsigned long)count];
     } else {
-        self.summaryLabel.stringValue = [NSString stringWithFormat:@"%@ · %lu 个目录 · 组内互相同步 · 自动保存", [group[@"enabled"] boolValue] ? @"已启用" : @"已停用", (unsigned long)count];
+        NSUInteger backupCount = 0;
+        for (NSDictionary *directory in [self selectedDirectories]) {
+            if ([[self modeForDirectory:directory] isEqualToString:@"version_backup"]) backupCount++;
+        }
+        NSUInteger workingCount = count - backupCount;
+        if (backupCount) {
+            self.summaryLabel.stringValue = [NSString stringWithFormat:@"%@ · %lu 个工作目录 · %lu 个版本备份 · 自动保存", [group[@"enabled"] boolValue] ? @"已启用" : @"已停用", (unsigned long)workingCount, (unsigned long)backupCount];
+        } else {
+            self.summaryLabel.stringValue = [NSString stringWithFormat:@"%@ · %lu 个目录 · 组内互相同步 · 自动保存", [group[@"enabled"] boolValue] ? @"已启用" : @"已停用", (unsigned long)count];
+        }
     }
 }
 
@@ -599,6 +635,27 @@
     NSArray *excludes = [self excludesForDirectory:directory];
     NSString *identifier = tableColumn.identifier;
 
+    if ([identifier isEqualToString:@"syncType"]) {
+        NSPopUpButton *popup = [tableView makeViewWithIdentifier:@"syncTypePopup" owner:self];
+        if (!popup) {
+            popup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+            popup.identifier = @"syncTypePopup";
+            popup.controlSize = NSControlSizeSmall;
+            popup.target = self;
+            popup.action = @selector(syncTypeChangedFromPopup:);
+        }
+        popup.target = self;
+        popup.action = @selector(syncTypeChangedFromPopup:);
+        popup.tag = row;
+        [popup removeAllItems];
+        [popup addItemWithTitle:excludes.count ? @"有排除" : @"镜像"];
+        [popup addItemWithTitle:@"版本备份"];
+        BOOL isBackup = [[self modeForDirectory:directory] isEqualToString:@"version_backup"];
+        [popup selectItemAtIndex:isBackup ? 1 : 0];
+        popup.toolTip = isBackup ? @"只接收同步，不允许此目录的改动回写到工作目录" : (excludes.count ? @"双向镜像；此目录有自定义排除项" : @"双向镜像");
+        return popup;
+    }
+
     if ([identifier isEqualToString:@"exclude"]) {
         NSButton *button = [tableView makeViewWithIdentifier:@"excludeButton" owner:self];
         if (!button) {
@@ -628,10 +685,6 @@
         field.stringValue = self.fileCounts[path] ?: @"…";
         field.alignment = NSTextAlignmentRight;
         field.toolTip = @"参与同步的有效文件数（不计系统/Unison 元数据，并应用本目录排除）";
-    } else if ([identifier isEqualToString:@"syncType"]) {
-        field.stringValue = excludes.count ? @"有排除" : @"镜像";
-        field.alignment = NSTextAlignmentCenter;
-        field.toolTip = excludes.count ? @"此目录有自定义排除项" : @"此目录没有自定义排除项";
     } else {
         field.stringValue = path;
         field.alignment = NSTextAlignmentLeft;

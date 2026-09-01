@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import "SyncGroupManager.h"
+#import "ConflictManager.h"
 
 @interface OCR2MDSyncStatusDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate>
 @property(nonatomic,strong) NSStatusItem *statusItem;
@@ -18,6 +19,8 @@
 @property(nonatomic,strong) NSURL *previewURL;
 @property(nonatomic,strong) NSURL *groupsURL;
 @property(nonatomic,strong) OCR2MDSyncGroupManager *syncGroupManager;
+@property(nonatomic,strong) NSURL *conflictURL;
+@property(nonatomic,strong) OCR2MDConflictManager *conflictManager;
 @end
 
 @implementation OCR2MDSyncStatusDelegate
@@ -31,8 +34,13 @@
     self.unisonLogURL = [home URLByAppendingPathComponent:@"Library/Logs/ocr2md-sync/unison.log"];
     self.previewURL = [self.syncRoot URLByAppendingPathComponent:@"syncstatus-preview.txt"];
     self.groupsURL = [self.syncRoot URLByAppendingPathComponent:@"sync-groups.json"];
+    self.conflictURL = [self.syncRoot URLByAppendingPathComponent:@"unison-conflicts.json"];
     NSURL *legacyProfileURL = [home URLByAppendingPathComponent:@"Library/Application Support/Unison/ocr2md.prf"];
     self.syncGroupManager = [[OCR2MDSyncGroupManager alloc] initWithConfigURL:self.groupsURL legacyProfileURL:legacyProfileURL];
+    __weak typeof(self) weakSelf = self;
+    self.conflictManager = [[OCR2MDConflictManager alloc] initWithConflictURL:self.conflictURL syncHandler:^{
+        [weakSelf kickSyncAgent];
+    }];
 
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     self.statusItem.button.imagePosition = NSImageOnly;
@@ -309,6 +317,11 @@
     [self addAction:@"立即同步" selector:@selector(syncNow:) key:@"s" toMenu:menu];
     [self addAction:@"打开 ocr2md" selector:@selector(openVault:) key:@"o" toMenu:menu];
     [self addAction:@"打开同步日志" selector:@selector(openLog:) key:@"l" toMenu:menu];
+    NSMenuItem *conflictsItem = [[NSMenuItem alloc] initWithTitle:@"处理同步冲突…" action:@selector(openConflicts:) keyEquivalent:@"c"];
+    conflictsItem.target = self;
+    conflictsItem.enabled = [health isEqualToString:@"conflict"];
+    conflictsItem.toolTip = conflictsItem.enabled ? @"检查双方版本并人工裁决冲突" : @"当前没有同步冲突";
+    [menu addItem:conflictsItem];
     [self addAction:@"管理同步目录组…" selector:@selector(openSyncGroups:) key:@"g" toMenu:menu];
 
     NSMenuItem *engineering = [[NSMenuItem alloc] initWithTitle:@"工程开发" action:nil keyEquivalent:@""];
@@ -340,11 +353,15 @@
     [self refresh:nil];
 }
 
-- (void)syncNow:(id)sender {
+- (void)kickSyncAgent {
     NSTask *task = [[NSTask alloc] init];
     task.executableURL = [NSURL fileURLWithPath:@"/bin/launchctl"];
     task.arguments = @[@"kickstart", @"-k", [NSString stringWithFormat:@"gui/%d/com.ocr2md.unison-sync", getuid()]];
     [task launchAndReturnError:nil];
+}
+
+- (void)syncNow:(id)sender {
+    [self kickSyncAgent];
 
     // Do not rebuild NSMenu while AppKit is still dispatching this menu item's action.
     // Rebuilding the live menu here can invalidate objects still owned by the menu
@@ -371,6 +388,12 @@
     // Let the status-menu tracking session finish before presenting another window.
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.syncGroupManager showWindow];
+    });
+}
+
+- (void)openConflicts:(id)sender {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.conflictManager showWindow];
     });
 }
 
