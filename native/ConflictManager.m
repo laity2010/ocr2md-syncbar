@@ -92,7 +92,7 @@
     [self.window center];
 
     NSView *content = self.window.contentView;
-    NSTextField *title = [NSTextField wrappingLabelWithString:@"同步已冻结，Unison 没有自动覆盖任何一边。选择冲突文件后，先检查双方版本，再决定以哪一边为准。处理前会自动保存双方副本。"];
+    NSTextField *title = [NSTextField wrappingLabelWithString:@"同步已冻结，Unison 没有自动覆盖任何一边。选择冲突文件后，先检查双方版本，再决定以哪一边为准。可按 Shift 或 ⌘ 多选并批量应用同一裁决；处理前会自动保存双方副本。"];
     title.translatesAutoresizingMaskIntoConstraints = NO;
     [content addSubview:title];
 
@@ -109,7 +109,7 @@
     [self.table addTableColumn:column];
     self.table.dataSource = self;
     self.table.delegate = self;
-    self.table.allowsMultipleSelection = NO;
+    self.table.allowsMultipleSelection = YES;
     self.table.rowHeight = 28;
 
     NSScrollView *scroll = [[NSScrollView alloc] init];
@@ -173,10 +173,17 @@
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification { [self refreshControls]; }
 
+- (NSArray<NSDictionary *> *)selectedConflicts {
+    NSMutableArray<NSDictionary *> *items = [NSMutableArray array];
+    [self.table.selectedRowIndexes enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        if (idx < self.conflicts.count) [items addObject:self.conflicts[idx]];
+    }];
+    return items;
+}
+
 - (NSDictionary *)selectedConflict {
-    NSInteger row = self.table.selectedRow;
-    if (row < 0 || row >= (NSInteger)self.conflicts.count) return nil;
-    return self.conflicts[(NSUInteger)row];
+    NSArray<NSDictionary *> *items = [self selectedConflicts];
+    return items.count == 1 ? items.firstObject : nil;
 }
 
 - (NSString *)fileInfoForRoot:(NSString *)root relative:(NSString *)relative {
@@ -196,25 +203,48 @@
 - (void)refreshControls {
     NSString *left = [self labelForRoot:self.leftRoot];
     NSString *right = [self labelForRoot:self.rightRoot];
-    BOOL has = [self selectedConflict] != nil;
-    self.summaryLabel.stringValue = self.conflicts.count
-        ? [NSString stringWithFormat:@"当前 %lu 个冲突 · %@ ↔ %@", (unsigned long)self.conflicts.count, left, right]
-        : @"当前没有可管理的冲突记录";
+    NSArray<NSDictionary *> *selected = [self selectedConflicts];
+    NSUInteger selectedCount = selected.count;
+    BOOL hasAny = selectedCount > 0;
+    BOOL hasSingle = selectedCount == 1;
+
+    if (!self.conflicts.count) {
+        self.summaryLabel.stringValue = @"当前没有可管理的冲突记录";
+    } else if (selectedCount > 1) {
+        self.summaryLabel.stringValue = [NSString stringWithFormat:@"当前 %lu 个冲突 · 已选择 %lu 项 · %@ ↔ %@",
+            (unsigned long)self.conflicts.count, (unsigned long)selectedCount, left, right];
+    } else {
+        self.summaryLabel.stringValue = [NSString stringWithFormat:@"当前 %lu 个冲突 · %@ ↔ %@",
+            (unsigned long)self.conflicts.count, left, right];
+    }
+
     self.openLeftButton.title = [NSString stringWithFormat:@"打开 %@", left];
     self.openRightButton.title = [NSString stringWithFormat:@"打开 %@", right];
-    self.resolveLeftButton.title = [NSString stringWithFormat:@"以 %@ 为准…", left];
-    self.resolveRightButton.title = [NSString stringWithFormat:@"以 %@ 为准…", right];
-    self.openLeftButton.enabled = has;
-    self.openRightButton.enabled = has;
-    self.resolveLeftButton.enabled = has;
-    self.resolveRightButton.enabled = has;
-    NSDictionary *item = [self selectedConflict];
-    NSString *path = item[@"path"] ?: @"";
-    self.detailLabel.stringValue = has
-        ? [NSString stringWithFormat:@"%@\n%@：%@\n    %@\n%@：%@\n    %@",
+    self.resolveLeftButton.title = selectedCount > 1
+        ? [NSString stringWithFormat:@"以 %@ 为准（%lu 项）…", left, (unsigned long)selectedCount]
+        : [NSString stringWithFormat:@"以 %@ 为准…", left];
+    self.resolveRightButton.title = selectedCount > 1
+        ? [NSString stringWithFormat:@"以 %@ 为准（%lu 项）…", right, (unsigned long)selectedCount]
+        : [NSString stringWithFormat:@"以 %@ 为准…", right];
+
+    // “打开”只针对单个文件；批量裁决按钮对任意非空选择可用。
+    self.openLeftButton.enabled = hasSingle;
+    self.openRightButton.enabled = hasSingle;
+    self.resolveLeftButton.enabled = hasAny;
+    self.resolveRightButton.enabled = hasAny;
+
+    if (hasSingle) {
+        NSDictionary *item = selected.firstObject;
+        NSString *path = item[@"path"] ?: @"";
+        self.detailLabel.stringValue = [NSString stringWithFormat:@"%@\n%@：%@\n    %@\n%@：%@\n    %@",
            path, left, self.leftRoot, [self fileInfoForRoot:self.leftRoot relative:path],
-           right, self.rightRoot, [self fileInfoForRoot:self.rightRoot relative:path]]
-        : @"若状态栏仍显示冲突但这里为空，可点“重新读取”；仍为空时请打开同步日志。";
+           right, self.rightRoot, [self fileInfoForRoot:self.rightRoot relative:path]];
+    } else if (selectedCount > 1) {
+        self.detailLabel.stringValue = [NSString stringWithFormat:@"已选择 %lu 项。批量裁决会先校验全部项目、统一备份双方版本，再逐项应用同一方向；最后只重新运行一次 Unison。",
+            (unsigned long)selectedCount];
+    } else {
+        self.detailLabel.stringValue = @"若状态栏仍显示冲突但这里为空，可点“重新读取”；仍为空时请打开同步日志。";
+    }
 }
 
 - (NSString *)safeFullPathForRoot:(NSString *)root relative:(NSString *)relative {
@@ -265,72 +295,118 @@
 }
 
 - (void)resolveFromRoot:(NSString *)sourceRoot toRoot:(NSString *)destRoot sourceLabel:(NSString *)sourceLabel destLabel:(NSString *)destLabel {
-    NSString *relative = [self selectedConflict][@"path"];
-    NSString *source = [self safeFullPathForRoot:sourceRoot relative:relative];
-    NSString *dest = [self safeFullPathForRoot:destRoot relative:relative];
-    if (!source.length || !dest.length) {
-        [self showMessage:@"路径不安全，已拒绝处理" info:relative];
-        return;
-    }
-    BOOL isDir = NO;
-    if (![[NSFileManager defaultManager] fileExistsAtPath:source isDirectory:&isDir] || isDir) {
-        [self showMessage:@"当前版本只自动处理双方都存在的文件内容冲突" info:@"删除冲突或目录冲突会继续冻结，不会自动裁决。"];
-        return;
-    }
-    BOOL destIsDir = NO;
-    if ([[NSFileManager defaultManager] fileExistsAtPath:dest isDirectory:&destIsDir] && destIsDir) {
-        [self showMessage:@"目标是目录，已拒绝处理" info:dest];
-        return;
+    NSArray<NSDictionary *> *selected = [self selectedConflicts];
+    if (!selected.count) return;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSDictionary *> *plans = [NSMutableArray arrayWithCapacity:selected.count];
+
+    // 第一阶段只校验，不改任何文件。批量里只要有一项不安全，就整批拒绝。
+    for (NSDictionary *item in selected) {
+        NSString *relative = [item[@"path"] isKindOfClass:[NSString class]] ? item[@"path"] : @"";
+        NSString *source = [self safeFullPathForRoot:sourceRoot relative:relative];
+        NSString *dest = [self safeFullPathForRoot:destRoot relative:relative];
+        if (!source.length || !dest.length) {
+            [self showMessage:@"路径不安全，整批未处理" info:relative];
+            return;
+        }
+        BOOL sourceIsDir = NO;
+        if (![fm fileExistsAtPath:source isDirectory:&sourceIsDir] || sourceIsDir) {
+            [self showMessage:@"批量中包含暂不能自动裁决的项目，整批未处理"
+                          info:[NSString stringWithFormat:@"当前版本只自动处理双方都存在的文件内容冲突。删除冲突或目录冲突会继续冻结。\n\n%@", relative]];
+            return;
+        }
+        BOOL destIsDir = NO;
+        if ([fm fileExistsAtPath:dest isDirectory:&destIsDir] && destIsDir) {
+            [self showMessage:@"批量中包含目录目标，整批未处理" info:relative];
+            return;
+        }
+        [plans addObject:@{ @"relative": relative, @"source": source, @"dest": dest }];
     }
 
     NSAlert *confirm = [[NSAlert alloc] init];
     confirm.alertStyle = NSAlertStyleWarning;
-    confirm.messageText = [NSString stringWithFormat:@"以 %@ 版本为准？", sourceLabel];
-    confirm.informativeText = [NSString stringWithFormat:@"%@ 的当前内容会被 %@ 覆盖。覆盖前会把双方版本保存到独立的 conflict-backups。\n\n%@", destLabel, sourceLabel, relative];
+    confirm.messageText = plans.count > 1
+        ? [NSString stringWithFormat:@"将 %lu 项都以 %@ 版本为准？", (unsigned long)plans.count, sourceLabel]
+        : [NSString stringWithFormat:@"以 %@ 版本为准？", sourceLabel];
+    confirm.informativeText = plans.count > 1
+        ? [NSString stringWithFormat:@"所选 %lu 项中，%@ 的当前内容都会被 %@ 覆盖。覆盖前会先把全部双方版本保存到同一份 conflict-backups；全部处理后只重新运行一次 Unison。",
+            (unsigned long)plans.count, destLabel, sourceLabel]
+        : [NSString stringWithFormat:@"%@ 的当前内容会被 %@ 覆盖。覆盖前会把双方版本保存到独立的 conflict-backups。\n\n%@",
+            destLabel, sourceLabel, plans.firstObject[@"relative"]];
     [confirm addButtonWithTitle:@"取消"];
-    [confirm addButtonWithTitle:@"确认处理"];
+    [confirm addButtonWithTitle:plans.count > 1 ? @"确认批量处理" : @"确认处理"];
     [NSApp activateIgnoringOtherApps:YES];
     if ([confirm runModal] != NSAlertSecondButtonReturn) return;
 
     NSString *backupRoot = [[[self.conflictURL URLByDeletingLastPathComponent] URLByAppendingPathComponent:@"conflict-backups" isDirectory:YES].path stringByAppendingPathComponent:[self timestampComponent]];
     NSError *error = nil;
-    if (![self backupPath:source relative:relative under:backupRoot side:@"chosen" error:&error] ||
-        ![self backupPath:dest relative:relative under:backupRoot side:@"replaced" error:&error]) {
-        [self showMessage:@"备份失败，未执行覆盖" info:error.localizedDescription ?: backupRoot];
-        return;
-    }
 
-    NSData *data = [NSData dataWithContentsOfFile:source options:NSDataReadingMappedIfSafe error:&error];
-    if (!data) {
-        [self showMessage:@"读取选定版本失败，未执行覆盖" info:error.localizedDescription ?: source];
-        return;
-    }
-    NSString *parent = dest.stringByDeletingLastPathComponent;
-    if (![[NSFileManager defaultManager] createDirectoryAtPath:parent withIntermediateDirectories:YES attributes:nil error:&error]) {
-        [self showMessage:@"无法创建目标目录" info:error.localizedDescription ?: parent];
-        return;
-    }
-    if ([[NSFileManager defaultManager] fileExistsAtPath:dest]) {
-        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:dest];
-        if (!handle) {
-            [self showMessage:@"无法写入目标文件" info:dest];
+    // 第二阶段先把整批双方版本完整备份。备份失败时一个目标文件都不覆盖。
+    for (NSDictionary *plan in plans) {
+        NSString *relative = plan[@"relative"];
+        if (![self backupPath:plan[@"source"] relative:relative under:backupRoot side:@"chosen" error:&error] ||
+            ![self backupPath:plan[@"dest"] relative:relative under:backupRoot side:@"replaced" error:&error]) {
+            [self showMessage:@"批量备份失败，未执行任何覆盖" info:error.localizedDescription ?: backupRoot];
             return;
         }
-        @try {
-            [handle truncateFileAtOffset:0];
-            [handle writeData:data];
-            [handle closeFile];
-        } @catch (NSException *exception) {
-            @try { [handle closeFile]; } @catch (__unused NSException *ignored) {}
-            [self showMessage:@"写入目标文件失败" info:exception.reason ?: dest];
-            return;
-        }
-    } else if (![[NSFileManager defaultManager] createFileAtPath:dest contents:data attributes:nil]) {
-        [self showMessage:@"创建目标文件失败" info:dest];
-        return;
     }
 
-    self.detailLabel.stringValue = [NSString stringWithFormat:@"已以 %@ 为准；双方原版本已备份。正在重新运行 Unison…\n备份：%@", sourceLabel, backupRoot];
+    // 第三阶段从刚保存的 chosen 快照读取，保证整批使用确认时的源版本。
+    NSUInteger completed = 0;
+    for (NSDictionary *plan in plans) {
+        NSString *relative = plan[@"relative"];
+        NSString *snapshot = [[backupRoot stringByAppendingPathComponent:@"chosen"] stringByAppendingPathComponent:relative];
+        NSData *data = [NSData dataWithContentsOfFile:snapshot options:NSDataReadingMappedIfSafe error:&error];
+        if (!data) {
+            [self showMessage:@"读取批量备份失败"
+                          info:[NSString stringWithFormat:@"已完成 %lu / %lu 项。其余项目未继续处理。\n\n%@",
+                                (unsigned long)completed, (unsigned long)plans.count, error.localizedDescription ?: snapshot]];
+            return;
+        }
+
+        NSString *dest = plan[@"dest"];
+        NSString *parent = dest.stringByDeletingLastPathComponent;
+        if (![fm createDirectoryAtPath:parent withIntermediateDirectories:YES attributes:nil error:&error]) {
+            [self showMessage:@"无法创建目标目录"
+                          info:[NSString stringWithFormat:@"已完成 %lu / %lu 项。\n\n%@",
+                                (unsigned long)completed, (unsigned long)plans.count, error.localizedDescription ?: parent]];
+            return;
+        }
+
+        if ([fm fileExistsAtPath:dest]) {
+            NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:dest];
+            if (!handle) {
+                [self showMessage:@"无法写入目标文件"
+                              info:[NSString stringWithFormat:@"已完成 %lu / %lu 项。\n\n%@",
+                                    (unsigned long)completed, (unsigned long)plans.count, dest]];
+                return;
+            }
+            @try {
+                [handle truncateFileAtOffset:0];
+                [handle writeData:data];
+                [handle closeFile];
+            } @catch (NSException *exception) {
+                @try { [handle closeFile]; } @catch (__unused NSException *ignored) {}
+                [self showMessage:@"写入目标文件失败"
+                              info:[NSString stringWithFormat:@"已完成 %lu / %lu 项。\n\n%@",
+                                    (unsigned long)completed, (unsigned long)plans.count, exception.reason ?: dest]];
+                return;
+            }
+        } else if (![fm createFileAtPath:dest contents:data attributes:nil]) {
+            [self showMessage:@"创建目标文件失败"
+                          info:[NSString stringWithFormat:@"已完成 %lu / %lu 项。\n\n%@",
+                                (unsigned long)completed, (unsigned long)plans.count, dest]];
+            return;
+        }
+        completed++;
+    }
+
+    self.detailLabel.stringValue = plans.count > 1
+        ? [NSString stringWithFormat:@"已将 %lu 项统一以 %@ 为准；双方原版本已备份。正在重新运行一次 Unison…\n备份：%@",
+            (unsigned long)plans.count, sourceLabel, backupRoot]
+        : [NSString stringWithFormat:@"已以 %@ 为准；双方原版本已备份。正在重新运行 Unison…\n备份：%@", sourceLabel, backupRoot];
+
     if (self.syncHandler) self.syncHandler();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1500 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
         [self loadDocument];
