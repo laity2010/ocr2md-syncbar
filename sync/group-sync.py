@@ -23,6 +23,7 @@ HOSTNAME = 'ocr2md-mac'
 
 CHANGE_RE = re.compile(r'(<----|---->|<-\?->)|\b(?:new file|changed|deleted)\b|Propagating updates|\[BGN\]\s+(?:Copying|Deleting|Updating)', re.I)
 CONFLICT_RE = re.compile(r'<-\?->')
+DIGEST_ERROR_RE = re.compile(r'Error in digesting\s+(.+?):?$', re.I)
 PATH_TOPOLOGY_RE = re.compile(r'\b(?:new file|new dir|deleted)\b', re.I)
 CONFLICT_PATH_RE = re.compile(r'^\s*skipped:\s+(.+?)\s+\(')
 CONFLICTS = SYNCROOT / 'unison-conflicts.json'
@@ -425,6 +426,8 @@ def run_edge(profile_name, group_name, group_id, pass_no, current, total, hub, s
     saw_change = False
     saw_conflict_text = False
     saw_path_change = False
+    saw_digest_error = False
+    digest_error_path = ''
     conflict_paths = []
     conflict_seen = set()
     assert proc.stdout is not None
@@ -433,6 +436,11 @@ def run_edge(profile_name, group_name, group_id, pass_no, current, total, hub, s
         line = raw.replace('\r', ' ')
         if CONFLICT_RE.search(line):
             saw_conflict_text = True
+        digest_match = DIGEST_ERROR_RE.search(line.strip())
+        if digest_match:
+            saw_digest_error = True
+            if not digest_error_path:
+                digest_error_path = digest_match.group(1).strip()
         if PATH_TOPOLOGY_RE.search(line):
             saw_path_change = True
         match = CONFLICT_PATH_RE.search(line)
@@ -447,7 +455,7 @@ def run_edge(profile_name, group_name, group_id, pass_no, current, total, hub, s
                 state_base['phase'] = 'syncing'
                 write_state(**state_base)
     rc = proc.wait()
-    return rc, saw_change, saw_conflict_text, conflict_paths, saw_path_change
+    return rc, saw_change, saw_conflict_text, conflict_paths, saw_path_change, saw_digest_error, digest_error_path
 
 
 def main():
@@ -501,7 +509,7 @@ def main():
                 full_scan, scan_reason = apply_group_convergence_scan(
                     full_scan, scan_reason, full_convergence_pass
                 )
-                rc, changed, conflict_text, conflict_paths, path_topology_changed = run_edge(
+                rc, changed, conflict_text, conflict_paths, path_topology_changed, digest_error, digest_error_path = run_edge(
                     profile_name, name, gid, pass_no, current, total,
                     hub, spoke, overall_start, full_scan=full_scan, scan_reason=scan_reason
                 )
@@ -516,18 +524,32 @@ def main():
                     # consistent starting point.
                     break
                 if rc != 0 or conflict_text:
-                    status = 'conflict_or_skipped' if rc == 1 or conflict_text else 'error'
+                    # Unison rc=1 means "some updates were skipped".  That is not
+                    # necessarily a content conflict: File Provider placeholders can
+                    # also fail to digest and return rc=1.  Only the explicit Unison
+                    # conflict marker (<-?->) is exposed to the conflict manager.
+                    status = 'conflict_or_skipped' if conflict_text else 'error'
                     end = now()
+                    extra = {}
+                    if digest_error:
+                        provider = 'OneDrive' if 'OneDrive-' in str(hub) or 'OneDrive-' in str(spoke) else ('Google Drive' if 'GoogleDrive-' in str(hub) or 'GoogleDrive-' in str(spoke) else '云盘')
+                        extra['error_kind'] = 'provider_content_unavailable'
+                        extra['error_detail'] = f'{provider} 文件内容暂不可读（可能尚未下载到本机）'
+                        if digest_error_path:
+                            extra['error_path'] = digest_error_path
                     write_state(
                         last_start=overall_start, last_end=end, exit_code=rc,
                         status=status, phase='', group=name, group_id=gid,
                         **{'pass': pass_no}, progress_current=current,
                         progress_total=total, edge_from=str(hub), edge_to=str(spoke),
-                        profile=profile_name,
+                        profile=profile_name, **extra,
                     )
                     if status == 'conflict_or_skipped':
                         write_conflicts(name, gid, profile_name, hub, spoke, conflict_paths)
-                    log(f'===== HALT {end} rc={rc} status={status} =====')
+                    else:
+                        # Never leave stale conflict UI behind for a non-conflict rc=1.
+                        clear_conflicts()
+                    log(f'===== HALT {end} rc={rc} status={status} error_kind={extra.get("error_kind", "")} =====')
                     return 1 if status == 'conflict_or_skipped' else (rc or 2)
             # After the first sweep, all configured replicas have participated.
             if pass_no == 1:

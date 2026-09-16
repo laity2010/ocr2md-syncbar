@@ -308,6 +308,12 @@
         warning.enabled = NO;
         [menu addItem:warning];
     } else if ([health isEqualToString:@"error"]) {
+        NSString *errorDetail = state[@"error_detail"] ?: @"";
+        if (errorDetail.length) {
+            NSMenuItem *detailItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"⚠️ %@", errorDetail] action:nil keyEquivalent:@""];
+            detailItem.enabled = NO;
+            [menu addItem:detailItem];
+        }
         NSMenuItem *err = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"退出码：%@", state[@"exit_code"] ?: @"?"] action:nil keyEquivalent:@""];
         err.enabled = NO;
         [menu addItem:err];
